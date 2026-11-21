@@ -1,0 +1,65 @@
+name: Record a deploy in Hajnej
+description: Makes the image and source SBOMs of one deploy with syft and records them in Hajnej, signed with the project's key.
+inputs:
+  url:
+    description: The project's deploy-record URL (https://<hajnej>/hooks/deploys/<binding id>), an Actions secret.
+    required: true
+  key:
+    description: The project's deploy-record key, an Actions secret. It signs the body and is never sent.
+    required: true
+  system:
+    description: The registry's system id, e.g. shop/prod@eks.
+    required: true
+  sha:
+    description: The deployed commit; defaults to the commit the workflow runs on.
+    required: false
+    default: ${{ github.sha }}
+  image:
+    description: The deployed image as <name>@sha256:<digest>; empty for an image-less deploy.
+    required: false
+    default: ''
+  image-source:
+    description: >-
+      Where syft reads the image's contents: docker-archive:<path> or oci-archive:<path> (a tarball the build job
+      handed over, so this job needs no registry credentials), oci-dir:<path>, or docker:<image> (the local daemon).
+      Empty reads registry:<image>, for a public image.
+    required: false
+    default: ''
+  source-dir:
+    description: The checkout the source SBOM is made of; empty skips it (a third-party image).
+    required: false
+    default: '.'
+  runtime:
+    description: The runtime string of an image-less deploy (compatibility_date, nodejs@20).
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Install syft
+      shell: bash
+      env:
+        SYFT_VERSION: 1.57.2
+        SYFT_SHA256: ${{ runner.arch == 'ARM64' && '8efe605309c98798e1ee0cffdcf8c05ca26819b4cd44c0b03650f1e963e9bdb6' || 'ad92bd3ec1b94a3df01d4d0aec199afa9c42b72e86da436ff5f837914d32706b' }}
+      run: |
+        set -euo pipefail
+        [[ "$RUNNER_OS" == Linux ]] || { echo "record-deploy runs on Linux runners only" >&2; exit 1; }
+        arch="$([[ "$RUNNER_ARCH" == ARM64 ]] && echo arm64 || echo amd64)"
+        archive="syft_${SYFT_VERSION}_linux_${arch}.tar.gz"
+        curl -sSfL -o "$RUNNER_TEMP/$archive" "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/$archive"
+        echo "$SYFT_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+        tar xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" syft
+    - name: Record the deploy
+      shell: bash
+      env:
+        HAJNEJ_DEPLOY_URL: ${{ inputs.url }}
+        HAJNEJ_DEPLOY_KEY: ${{ inputs.key }}
+        SYSTEM: ${{ inputs.system }}
+        SHA: ${{ inputs.sha }}
+        IMAGE: ${{ inputs.image }}
+        IMAGE_SOURCE: ${{ inputs.image-source }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        RUNTIME: ${{ inputs.runtime }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        SYFT: ${{ runner.temp }}/syft
+      run: ${{ github.action_path }}/record.sh
