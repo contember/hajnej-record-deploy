@@ -73,23 +73,27 @@ while :; do
 		break
 	fi
 	if (( code != 0 )); then
-		# Refused, timed out, TLS handshake, connection dropped: what a deploy causes. A wrong URL or host is not.
+		# Refused, timed out, TLS handshake, connection or HTTP/2 stream dropped, answer cut short: transient. A wrong URL
+		# or host is not.
 		case "$code" in
-			7 | 28 | 35 | 52 | 55 | 56) why="curl exit $code" delay=10 ;;
+			7 | 16 | 18 | 28 | 35 | 52 | 55 | 56 | 92) why="curl exit $code" delay=10 ;;
 			*) exit "$code" ;;
 		esac
 	elif [[ "$status" == 503 ]]; then
 		why="Hajnej answered 503: $(head -c 200 "$work/answer")"
 		delay="$(tr -d '\r' < "$work/headers" | awk 'tolower($1) == "retry-after:" { value = $2 } END { print value }')"
-		# Retry-After may also be an HTTP date; anything but seconds waits the default.
-		[[ "$delay" =~ ^[0-9]+$ ]] || delay=10
-		(( delay >= 1 )) || delay=1
+		# Retry-After may also be an HTTP date; anything but seconds waits the default. Kept within 1-60 s.
+		if [[ "$delay" =~ ^[0-9]{1,6}$ ]]; then
+			delay=$(( 10#$delay < 1 ? 1 : 10#$delay > 60 ? 60 : 10#$delay ))
+		else
+			delay=10
+		fi
 	else
 		echo "Hajnej answered $status: $(head -c 500 "$work/answer")" >&2
 		exit 1
 	fi
 	if (( $(date +%s) + delay > deadline )); then
-		echo "$why; gave up after $attempt attempts" >&2
+		echo "$why; gave up after attempt $attempt, as a retry in ${delay}s would pass the retry time" >&2
 		exit 1
 	fi
 	echo "$why; attempt $attempt, retrying in ${delay}s" >&2
