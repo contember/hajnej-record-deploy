@@ -99,6 +99,9 @@ alternative, as long as that credential cannot deploy.
 - `record.sh`: syft for the image and the checkout (CycloneDX JSON), a JSON body
   `{ system, sha, imageDigest?, imageSbom?, sourceSbom?, runtime?, runUrl? }`, and a POST with
   `X-Hajnej-Timestamp: <unix seconds>` and `X-Hajnej-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<body>">`.
-  A non-200 answer fails the step.
+  A 503 (Hajnej answers it with `Retry-After` for a few minutes while it deploys) and a refused, timed-out or dropped
+  connection are retried, re-signed each time, for up to 5 minutes; any other non-200 answer fails the step at once.
+  A connection lost after Hajnej stored the record makes a second record of the same deploy, which changes nothing it
+  matches. Give the job at least 8 minutes: the SBOMs, the retries and the last attempt's 60-second limit.
 - It needs `bash`, `curl`, `jq`, `openssl`, `sha256sum` and `tar` (all on GitHub's Ubuntu runners). openssl takes the
   key on its command line, visible to the runner's own processes for the moment it runs.
