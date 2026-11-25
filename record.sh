@@ -11,6 +11,7 @@
 #   RUNTIME            optional: the runtime string of an image-less deploy (compatibility_date, nodejs@20)
 #   RUN_URL            optional: the pipeline run
 #   SYFT               the syft binary
+#   RETRY_SECONDS      optional: how long a 503 or a connection error is retried (default 300)
 set -euo pipefail
 
 : "${HAJNEJ_DEPLOY_URL:?}" "${HAJNEJ_DEPLOY_KEY:?}" "${SYSTEM:?}" "${SHA:?}" "${SYFT:?}"
@@ -53,18 +54,50 @@ if [[ -n "${RUN_URL:-}" ]]; then
 fi
 jq -cn "${args[@]}" "$filter" > "$work/body.json"
 
-timestamp="$(date +%s)"
-# openssl takes the key on its command line, visible to this runner's own processes for the moment it runs.
-signature="$( { printf '%s.' "$timestamp"; cat "$work/body.json"; } | openssl dgst -sha256 -hmac "$HAJNEJ_DEPLOY_KEY" | sed 's/^.*= //')"
-
-status="$(curl -sS -o "$work/answer" -w '%{http_code}' --max-time 60 \
-	-H 'Content-Type: application/json' \
-	-H "X-Hajnej-Timestamp: $timestamp" \
-	-H "X-Hajnej-Signature: sha256=$signature" \
-	--data-binary "@$work/body.json" \
-	"$HAJNEJ_DEPLOY_URL")"
-if [[ "$status" != 200 ]]; then
-	echo "Hajnej answered $status: $(head -c 500 "$work/answer")" >&2
-	exit 1
-fi
+# Hajnej answers 503 with Retry-After for a few minutes while it deploys, and a deploy may drop connections: both are
+# retried until RETRY_SECONDS have passed. Each attempt signs anew, as Hajnej accepts a timestamp only within 5 minutes.
+deadline=$(( $(date +%s) + ${RETRY_SECONDS:-300} ))
+attempt=1
+while :; do
+	timestamp="$(date +%s)"
+	# openssl takes the key on its command line, visible to this runner's own processes for the moment it runs.
+	signature="$( { printf '%s.' "$timestamp"; cat "$work/body.json"; } | openssl dgst -sha256 -hmac "$HAJNEJ_DEPLOY_KEY" | sed 's/^.*= //')"
+	code=0
+	status="$(curl -sS -o "$work/answer" -D "$work/headers" -w '%{http_code}' --max-time 60 \
+		-H 'Content-Type: application/json' \
+		-H "X-Hajnej-Timestamp: $timestamp" \
+		-H "X-Hajnej-Signature: sha256=$signature" \
+		--data-binary "@$work/body.json" \
+		"$HAJNEJ_DEPLOY_URL")" || code=$?
+	if (( code == 0 )) && [[ "$status" == 200 ]]; then
+		break
+	fi
+	if (( code != 0 )); then
+		# Refused, timed out, TLS handshake, connection or HTTP/2 stream dropped, answer cut short: transient. A wrong URL
+		# or host is not.
+		case "$code" in
+			7 | 16 | 18 | 28 | 35 | 52 | 55 | 56 | 92) why="curl exit $code" delay=10 ;;
+			*) exit "$code" ;;
+		esac
+	elif [[ "$status" == 503 ]]; then
+		why="Hajnej answered 503: $(head -c 200 "$work/answer")"
+		delay="$(tr -d '\r' < "$work/headers" | awk 'tolower($1) == "retry-after:" { value = $2 } END { print value }')"
+		# Retry-After may also be an HTTP date; anything but seconds waits the default. Kept within 1-60 s.
+		if [[ "$delay" =~ ^[0-9]{1,6}$ ]]; then
+			delay=$(( 10#$delay < 1 ? 1 : 10#$delay > 60 ? 60 : 10#$delay ))
+		else
+			delay=10
+		fi
+	else
+		echo "Hajnej answered $status: $(head -c 500 "$work/answer")" >&2
+		exit 1
+	fi
+	if (( $(date +%s) + delay > deadline )); then
+		echo "$why; gave up after attempt $attempt, as a retry in ${delay}s would pass the retry time" >&2
+		exit 1
+	fi
+	echo "$why; attempt $attempt, retrying in ${delay}s" >&2
+	sleep "$delay"
+	attempt=$(( attempt + 1 ))
+done
 echo "recorded $SYSTEM@$SHA in Hajnej"
