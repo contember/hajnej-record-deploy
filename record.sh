@@ -7,7 +7,9 @@
 #   IMAGE              optional: the image as <name>@sha256:<digest>, for a container deploy
 #   IMAGE_SOURCE       optional: where syft reads the image (docker-archive:, oci-archive:, oci-dir:, docker:, registry:);
 #                      default registry:$IMAGE
-#   SOURCE_DIR         optional: the checkout to make the source SBOM of (default .); empty skips it
+#   SOURCE_DIR         optional: what the source SBOM is made of (default .), one path per line; empty skips it. One
+#                      directory is scanned in place; several paths, or a file, are copied with their relative paths
+#                      into one directory first
 #   RUNTIME            optional: the runtime string of an image-less deploy (compatibility_date, nodejs@20)
 #   RUN_URL            optional: the pipeline run
 #   SYFT               the syft binary
@@ -16,6 +18,26 @@ set -euo pipefail
 
 : "${HAJNEJ_DEPLOY_URL:?}" "${HAJNEJ_DEPLOY_KEY:?}" "${SYSTEM:?}" "${SHA:?}" "${SYFT:?}"
 SOURCE_DIR="${SOURCE_DIR-.}"
+source_paths=()
+while IFS= read -r line; do
+	line="${line#"${line%%[![:space:]]*}"}"
+	line="${line%"${line##*[![:space:]]}"}"
+	if [[ -n "$line" ]]; then
+		source_paths+=("$line")
+	fi
+done <<< "$SOURCE_DIR"
+stage_source=false
+if (( ${#source_paths[@]} > 1 )) || { (( ${#source_paths[@]} == 1 )) && [[ ! -d "${source_paths[0]}" ]]; }; then
+	stage_source=true
+	for path in "${source_paths[@]}"; do
+		# cp --parents puts a path under the staging directory as written, so an absolute or .. path would land elsewhere.
+		if [[ "$path" == /* || "/$path/" == */../* ]]; then
+			echo "SOURCE_DIR paths must be relative and stay inside the working directory: $path" >&2
+			exit 1
+		fi
+		[[ -e "$path" ]] || { echo "SOURCE_DIR path does not exist: $path" >&2; exit 1; }
+	done
+fi
 if [[ -z "${IMAGE:-}" && -n "${IMAGE_SOURCE:-}" ]]; then
 	echo "IMAGE_SOURCE needs IMAGE: the digest the deploy runs is what Hajnej records" >&2
 	exit 1
@@ -39,8 +61,14 @@ if [[ -n "${IMAGE:-}" ]]; then
 	args+=(--arg digest "$digest" --rawfile image "$work/image.cdx.json")
 	filter="$filter + {imageDigest: \$digest, imageSbom: \$image}"
 fi
-if [[ -n "$SOURCE_DIR" ]]; then
-	"$SYFT" scan "dir:$SOURCE_DIR" -o "cyclonedx-json=$work/source.cdx.json" -q
+if (( ${#source_paths[@]} > 0 )); then
+	scanned="${source_paths[0]}"
+	if [[ "$stage_source" == true ]]; then
+		scanned="$work/source"
+		mkdir "$scanned"
+		cp -R --parents -- "${source_paths[@]}" "$scanned/"
+	fi
+	"$SYFT" scan "dir:$scanned" -o "cyclonedx-json=$work/source.cdx.json" -q
 	args+=(--rawfile source "$work/source.cdx.json")
 	filter="$filter + {sourceSbom: \$source}"
 fi

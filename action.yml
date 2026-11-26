@@ -26,7 +26,10 @@ inputs:
     required: false
     default: ''
   source-dir:
-    description: The checkout the source SBOM is made of; empty skips it (a third-party image).
+    description: >-
+      What the source SBOM is made of, one path per line: the checkout, or in a monorepo the app's directory with the
+      shared packages and root lockfile it builds from (paths relative to the working directory). Empty skips it (a
+      third-party image).
     required: false
     default: '.'
   runtime:
