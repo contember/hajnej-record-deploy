@@ -17,7 +17,7 @@ action cannot be used by workflows of another organization.
 | `sha` | no | The deployed commit; default `github.sha`. Set it when the workflow runs on another commit than it deploys (`workflow_run`) |
 | `image` | no | The deployed image as `<name>@sha256:<digest>`; empty for an image-less deploy |
 | `image-source` | no | Where syft reads the image: `docker-archive:<path>`, `oci-archive:<path>`, `oci-dir:<path>`, `docker:<image>` (the local daemon) or `registry:<image>`; default `registry:<image>`. A `docker:` or `registry:` source must name `image` itself |
-| `source-dir` | no | The checkout the source SBOM is made of, default `.`; empty skips it (a third-party image) |
+| `source-dir` | no | What the source SBOM is made of, one path per line, default `.` (the checkout); empty skips it (a third-party image). In a monorepo, list the app's directory and what its build reads besides it: shared packages, the root lockfile and manifest. One directory is scanned in place; several paths, or a file, are copied with their relative paths into one directory first, so they must be relative and stay inside the working directory |
 | `runtime` | no | The runtime string of an image-less deploy (`compatibility_date`, `nodejs@20`) |
 
 A system that runs an image needs `image`; Hajnej refuses its record without the image SBOM.
@@ -69,6 +69,25 @@ jobs:
 The archive holds the layers of the runner's platform; the digest Hajnej records is the one `image` names. An image of
 several hundred MB makes a slow artifact: `registry:<ref>` with a read-only pull credential in the record job is the
 alternative, as long as that credential cannot deploy.
+
+### One app of a monorepo
+
+Without `source-dir`, the source SBOM lists every lockfile of the checkout, so each app is matched against the
+packages of all the others. List what the app's build reads instead:
+
+```yaml
+      - uses: contember/hajnej-record-deploy@<sha>
+        with:
+          # … url, key, system, image, image-source as above
+          source-dir: |
+            apps/api
+            packages/shared
+            package.json
+            yarn.lock
+```
+
+A workspace lockfile at the root still lists the packages of every workspace. Keep the root `package.json` beside it:
+syft reads it to tell runtime dependencies from development ones.
 
 ### An image-less deploy (Workers, Zerops, Vercel, Pages)
 
